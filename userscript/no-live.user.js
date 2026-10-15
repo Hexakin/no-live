@@ -29,22 +29,22 @@
 (() => {
   'use strict';
   if (window.__noLiveGuard) return;
-  // Read-only marker: a page script can't switch the guard off by overwriting it.
-  Object.defineProperty(window, '__noLiveGuard', { value: true });
 
   const MESSAGE = 'Live streams are blocked in this browser (No Live).';
   // Language-independent badge styles YouTube uses for "live now" tiles.
   const LIVE_BADGES = ['BADGE_STYLE_TYPE_LIVE_NOW', 'THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE'];
   const ID_KEYS = ['videoId', 'contentId'];
-  // Last few things the guard did, for checking it in the console: window.__noLiveLog
+  // Last few things the guard did (never which video), for checking it in the console: window.__noLiveLog
   const log = (window.__noLiveLog = []);
   // Videos blocked from the data layer, so the backstop keeps them covered even after the
   // player drops its copy of the data.
   const blockedIds = new Set();
   const note = (what) => { log.push(what); if (log.length > 30) log.shift(); };
   const validId = (id) => typeof id === 'string' && id.length > 0;
-  // Deeper than this, the scan stops (YouTube's data is far shallower), so it can't overflow the stack.
+  // Limits for the scan. YouTube's data is far shallower and smaller, so these only stop a
+  // malformed or cyclic object from overflowing the stack or freezing the tab.
   const MAX_DEPTH = 200;
+  const MAX_NODES = 1000000;
 
   // ---- Layer 1: player data ----
 
@@ -72,8 +72,10 @@
   // Walks the tree bottom-up. Each node reports whether it holds a live badge and how many
   // distinct video ids it holds (0, 1 or "2 or more"). An array entry with a live badge and
   // exactly one video id is a single live tile, so it is removed. Shelves hold many ids and stay.
-  function scan(node, depth = 0) {
-    if (node === null || typeof node !== 'object' || depth > MAX_DEPTH) return { live: false, id: null, many: false };
+  function scan(node, depth = 0, seen = { set: new WeakSet(), count: 0 }) {
+    if (node === null || typeof node !== 'object' || depth > MAX_DEPTH ||
+        seen.set.has(node) || ++seen.count > MAX_NODES) return { live: false, id: null, many: false };
+    seen.set.add(node);
     const acc = { live: false, id: null, many: false };
     const merge = (r) => {
       if (r.live) acc.live = true;
@@ -85,7 +87,7 @@
     };
     if (Array.isArray(node)) {
       for (let i = node.length - 1; i >= 0; i--) {
-        const r = scan(node[i], depth + 1);
+        const r = scan(node[i], depth + 1, seen);
         if (r.live && r.id && !r.many && isTile(node[i])) {
           node.splice(i, 1);
           continue;
@@ -101,7 +103,7 @@
         else if (ID_KEYS.includes(key)) merge({ live: false, id: value, many: false });
         else if (key === 'style' && value === 'LIVE') acc.live = true;
       } else if (value && typeof value === 'object') {
-        merge(scan(value, depth + 1));
+        merge(scan(value, depth + 1, seen));
       }
     }
     return acc;
@@ -122,7 +124,7 @@
       if (data.playabilityStatus && data.videoDetails) {
         const live = isLivePlayer(data);
         const id = data.videoDetails.videoId;
-        note((live ? 'blocked ' : 'allowed ') + (id || '?') + ' via ' + via);
+        note((live ? 'blocked a live stream' : 'allowed a video') + ' via ' + via);
         if (live) {
           if (validId(id)) blockedIds.add(id);
           blockPlayer(data);
@@ -149,47 +151,64 @@
 
   // JSON.parse covers XHR, response.text() + parse, and data embedded as strings.
   const nativeParse = JSON.parse;
-  JSON.parse = function (text, reviver) {
+  const guardedParse = function (text, reviver) {
     const value = nativeParse.call(this, text, reviver);
     if (typeof text === 'string' && mightMatter(text)) process(value, 'parse');
     return value;
   };
+  JSON.parse = guardedParse;
 
   // response.json() doesn't go through JSON.parse, so wrap it too. Only YouTube's hosts count.
   function isYouTubeUrl(url) {
     try {
-      const host = new URL(url || location.href).hostname;
+      if (!url) return false;
+      const host = new URL(url).hostname;
       return /(^|\.)youtube(-nocookie)?\.com$/.test(host) || host === 'youtubei.googleapis.com';
     } catch (e) {
       return false;
     }
   }
   const nativeJson = Response.prototype.json;
-  Response.prototype.json = function () {
+  const guardedJson = function () {
     return nativeJson.call(this).then((value) => {
       if (isYouTubeUrl(this.url)) process(value, 'json');
       return value;
     });
   };
+  Response.prototype.json = guardedJson;
 
   // First page load: YouTube writes these as plain globals in an inline script.
-  for (const name of ['ytInitialPlayerResponse', 'ytInitialData']) {
+  const GLOBALS = ['ytInitialPlayerResponse', 'ytInitialData'];
+  const setters = {};
+  function guardGlobal(name) {
     let stored = window[name];
     if (stored !== undefined) process(stored, name);
+    const set = (value) => {
+      if (typeof value === 'string' && mightMatter(value)) {
+        try { value = JSON.stringify(process(nativeParse(value), name)); } catch (e) { /* leave it */ }
+      } else {
+        process(value, name);
+      }
+      stored = value;
+    };
+    setters[name] = set;
     try {
-      Object.defineProperty(window, name, {
-        configurable: true,
-        get: () => stored,
-        set: (value) => {
-          if (typeof value === 'string' && mightMatter(value)) {
-            try { value = JSON.stringify(process(nativeParse(value), name)); } catch (e) { /* leave it */ }
-          } else {
-            process(value, name);
-          }
-          stored = value;
-        },
-      });
+      // Configurable on purpose: YouTube's own "var ytInitialData = ..." must still work.
+      Object.defineProperty(window, name, { configurable: true, get: () => stored, set });
     } catch (e) { /* already locked down; the backstop still runs */ }
+  }
+  GLOBALS.forEach(guardGlobal);
+
+  // If anything puts the originals back, put the guard back (checked every second).
+  function rearm() {
+    try {
+      if (JSON.parse !== guardedParse) { JSON.parse = guardedParse; note('re-armed JSON.parse'); }
+      if (Response.prototype.json !== guardedJson) { Response.prototype.json = guardedJson; note('re-armed Response.json'); }
+      for (const name of GLOBALS) {
+        const d = Object.getOwnPropertyDescriptor(window, name);
+        if (!d || d.set !== setters[name]) { guardGlobal(name); note('re-armed ' + name); }
+      }
+    } catch (e) { /* keep going; the backstop still runs */ }
   }
 
   // ---- Layer 3: backstop on the player itself ----
@@ -259,8 +278,11 @@
   // Media events don't bubble, but they do pass through the capture phase, so these fire as
   // soon as any video starts loading, well before the first frame is drawn. 'volumechange'
   // catches an unmute (by YouTube or by hand) and mutes again at once.
-  for (const event of ['loadstart', 'loadedmetadata', 'play', 'playing', 'timeupdate', 'volumechange']) {
+  for (const event of ['loadstart', 'loadedmetadata', 'play', 'playing', 'volumechange']) {
     document.addEventListener(event, check, true);
   }
-  setInterval(check, 1000);
+  setInterval(() => { rearm(); check(); }, 1000);
+
+  // Read-only marker, set last so a failed install can't leave a marker with no guard behind it.
+  Object.defineProperty(window, '__noLiveGuard', { value: true });
 })();

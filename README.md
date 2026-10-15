@@ -21,6 +21,9 @@ Page: [hillmade.uk/no-live](https://hillmade.uk/no-live) · Source: [github.com/
   don't allow add-ons, and network blocking can't separate live streams from the rest of YouTube.
 - **It does not touch other sites or services:** BBC iPlayer, ITVX, Channel 4, Sky, other live TV
   sites, or live TV through a TV aerial or set-top box.
+- **It is not a lock.** It stops live TV on YouTube by accident or by habit. Anyone who wants to
+  get round it can: remove it, use another browser, or use the app. It also runs inside YouTube's
+  own page, so a change on YouTube's side could stop it working until it is updated.
 
 ## How it works
 
@@ -71,7 +74,7 @@ Run on 15 Oct 2026 against real YouTube, unless marked offline.
 | `npm run test:userscript` with `NO_LIVE_CHROME` set to Chrome | Chrome | 13 of 13 PASS |
 | `npm run test:firefox` (userscript) | Firefox (Playwright's build, 157.0) | 13 of 13 PASS |
 | `npm run test:webkit` (userscript) | WebKit (Playwright's build, 27.2) | 11 PASS, 2 INCONCLUSIVE, 0 FAIL. The live control and the desktop normal video did not decode (no playback progress), so they are not counted as passes |
-| `npm run test:offline` (synthetic data, no network) | Edge, Firefox, WebKit | 20 of 20 PASS in each |
+| `npm run test:offline` (synthetic data, no network) | Edge, Firefox, WebKit | 24 of 24 PASS in each |
 
 These were re-run on the same day after the security review fixes (see CHANGELOG.md).
 

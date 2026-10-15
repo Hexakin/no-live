@@ -8,7 +8,7 @@ No Live is a browser extension and a userscript made by Hillmade. This is what i
 
 **It collects nothing.** No Live does not collect, record or keep any information about you: not what you watch, search for or click.
 
-**It stores nothing.** It saves no history, no cookies and no settings, and it does not use browser storage.
+**It stores nothing.** It saves no history, no cookies and no settings, and it does not use browser storage. While a YouTube tab is open, it keeps a list of its last 30 actions in that tab's memory (for example "blocked a live stream"), for troubleshooting in the browser console. The list never says which video, never leaves your browser, and is gone when the tab closes.
 
 **It sends nothing.** It makes no network requests of its own. It sends nothing to Hillmade, to anyone else or to any server. It has no analytics, no crash reporting and no advertising.
 

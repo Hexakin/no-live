@@ -171,7 +171,7 @@ const b = await back.evaluate(async (fx) => {
   out.rerenderMuted = again.v.muted === true; out.rerenderCovered = overlay(again.p);
   again.p.getPlayerResponse = () => fx.normal; again.p.getVideoData = () => ({ video_id: 'NORM1', isLive: false });
   again.p.querySelector('#no-live-overlay')?.remove();
-  again.v.muted = false; again.v.dispatchEvent(new Event('timeupdate'));
+  again.v.muted = false; again.v.dispatchEvent(new Event('play'));
   await wait();
   out.normalNotCovered = !overlay(again.p); out.normalKeepsSound = again.v.muted === false;
   // Bare players: the backstop's checks above use a player that has a video id.
@@ -209,6 +209,38 @@ report('live player re-rendered by YouTube is muted and covered on loadstart', b
 report('a normal player is not covered and keeps its sound', b.normalNotCovered && b.normalKeepsSound);
 report('a replay of a stream first seen live is not covered (same video id)', b.replayAfterLiveNotCovered);
 report('a live payload with no video id does not cover empty players', b.noIdNotCovered);
+
+// ---- hardening from the Grok security review ----
+const hard = await ctx.newPage();
+await hard.goto('https://www.youtube.com/hardening');
+const h = await hard.evaluate(async () => {
+  const out = {};
+  const pad = 'x'.repeat(300);
+  // A cyclic object handed to a guarded global must not hang the tab, and its live tile still goes.
+  const cyc = { contents: [{ videoRenderer: { videoId: 'C1', badges: [{ metadataBadgeRenderer: { style: 'BADGE_STYLE_TYPE_LIVE_NOW' } }] } }] };
+  cyc.self = cyc; cyc.contents.push(cyc);
+  const t0 = performance.now();
+  window.ytInitialData = cyc;
+  out.cycleMs = Math.round(performance.now() - t0);
+  out.cycleTileRemoved = !cyc.contents.some((c) => c.videoRenderer);
+  // A Response built in script has no URL, so it is not YouTube's and is left alone.
+  const body = JSON.stringify({ pad, playabilityStatus: { status: 'OK' }, videoDetails: { videoId: 'E1', isLive: true } });
+  out.emptyUrlUntouched = (await new Response(body).json()).playabilityStatus.status === 'OK';
+  // Putting another JSON.parse in place gets the guard put back within the one-second timer.
+  const frame = document.createElement('iframe');
+  document.body.appendChild(frame);
+  JSON.parse = frame.contentWindow.JSON.parse.bind(frame.contentWindow.JSON);
+  await new Promise((r) => setTimeout(r, 1600));
+  const after = JSON.parse(JSON.stringify({ pad, playabilityStatus: { status: 'OK' }, videoDetails: { videoId: 'R1', isLive: true } }));
+  out.rearmed = after.playabilityStatus.status === 'UNPLAYABLE';
+  // The log says what the guard did, never which video.
+  out.logHasNoIds = (window.__noLiveLog || []).length > 0 && !(window.__noLiveLog || []).some((x) => /R1|E1|C1/.test(x));
+  return out;
+});
+report('a cyclic object does not hang the tab and its live tile is removed', h.cycleMs < 500 && h.cycleTileRemoved, JSON.stringify({ ms: h.cycleMs, removed: h.cycleTileRemoved }));
+report('a script-built Response with no URL is left alone', h.emptyUrlUntouched);
+report('a replaced JSON.parse is put back by the timer', h.rearmed);
+report('the troubleshooting log holds no video ids', h.logHasNoIds);
 
 await browser.close();
 const failed = results.filter((r) => !r).length;
