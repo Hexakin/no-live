@@ -1,31 +1,57 @@
 // End-to-end check against real YouTube.
-//   node test/run.mjs                    the browser extension
-//   node test/run.mjs --userscript       the userscript, injected at document start the way Tampermonkey does
-// Each check prints PASS/FAIL. The control run (no extension) proves the checks can fail.
-import { chromium } from 'playwright';
+//   node test/run.mjs                              the browser extension, in Edge
+//   node test/run.mjs --userscript                 the userscript, injected at document start the way Tampermonkey does, in Edge
+//   node test/run.mjs --engine=firefox             the userscript in Playwright's Firefox
+//   node test/run.mjs --engine=webkit              the userscript in Playwright's WebKit (a stand-in for iPhone Safari, NOT a real iPhone)
+// Each check prints PASS, FAIL or INCONCLUSIVE. The control run (no No Live) proves the checks can fail.
+// Outside Edge, the bundled browser may not decode YouTube's live video. Then the "plays" checks
+// are INCONCLUSIVE rather than PASS, and blocking is judged by the player's message and status.
+import { chromium, firefox, webkit, devices } from 'playwright';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { CHROME, acceptConsent, findLiveId, findNormalId } from './yt.mjs';
 
+const arg = (name) => process.argv.find((a) => a.startsWith(`--${name}=`))?.split('=')[1];
+const ENGINE = arg('engine') || 'chromium';
+if (!['chromium', 'firefox', 'webkit'].includes(ENGINE)) throw new Error(`unknown engine ${ENGINE}`);
+const ENGINES = { chromium, firefox, webkit };
 const EXT = path.resolve('extension');
-const USERSCRIPT = (process.env.NO_LIVE_MODE === 'userscript' || process.argv.includes('--userscript')) ? path.resolve('userscript/no-live.user.js') : null;
-console.log('testing', USERSCRIPT ? 'userscript' : 'extension', 'in', path.basename(CHROME));
+const USERSCRIPT = (ENGINE !== 'chromium' || process.env.NO_LIVE_MODE === 'userscript' || process.argv.includes('--userscript'))
+  ? path.resolve('userscript/no-live.user.js') : null;
+const LABEL = ENGINE === 'chromium' ? path.basename(CHROME) : `${ENGINE} (Playwright build)`;
+console.log('testing', USERSCRIPT ? 'userscript' : 'extension', 'in', LABEL);
 const OUT = path.resolve('test/out');
 fs.mkdirSync(OUT, { recursive: true });
-const results = [];
-const report = (name, ok, detail = '') => { results.push(ok); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}  ${detail}`); };
+const prefix = ENGINE === 'chromium' ? '' : `${ENGINE}-`;
+const shot = (page, name) => page.screenshot({ path: path.join(OUT, prefix + name) }).catch(() => {});
 
-async function launch(withExtension, mobile = false) {
+const verdicts = [];
+const report = (name, verdict, detail = '') => {
+  const word = verdict === true ? 'PASS' : verdict === 'INCONCLUSIVE' ? 'INCONCLUSIVE' : 'FAIL';
+  verdicts.push(word);
+  console.log(`${word}  ${name}  ${detail}`);
+};
+
+// Launches the engine under test. Edge is the only Chromium used for the real checks.
+async function launch(withExtension, mobile = false, engine = ENGINE) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nolive-'));
-  const args = ['--autoplay-policy=no-user-gesture-required', '--mute-audio'];
-  if (withExtension && !USERSCRIPT) args.push(`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`);
-  const ctx = await chromium.launchPersistentContext(dir, {
-    executablePath: CHROME, headless: true, args, locale: 'en-GB',
-    ignoreDefaultArgs: ['--disable-extensions'],
-    ...(mobile ? { viewport: { width: 412, height: 915 }, isMobile: true, hasTouch: true,
-      userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Mobile Safari/537.36' } : {}),
-  });
+  const opts = { headless: true, locale: 'en-GB' };
+  if (engine === 'chromium') {
+    const args = ['--autoplay-policy=no-user-gesture-required', '--mute-audio'];
+    if (withExtension && !USERSCRIPT) args.push(`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`);
+    Object.assign(opts, { executablePath: CHROME, args, ignoreDefaultArgs: ['--disable-extensions'] });
+    if (mobile) Object.assign(opts, { viewport: { width: 412, height: 915 }, isMobile: true, hasTouch: true,
+      userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Mobile Safari/537.36' });
+  } else {
+    if (engine === 'firefox') opts.firefoxUserPrefs = { 'media.autoplay.default': 0, 'media.autoplay.blocking_policy': 0 };
+    if (mobile) {
+      // WebKit gets iPhone Safari's user agent and touch setup. Firefox only gets a phone-sized viewport.
+      const { defaultBrowserType, ...iphone } = devices['iPhone 13'];
+      Object.assign(opts, engine === 'webkit' ? iphone : { viewport: { width: 412, height: 915 } });
+    }
+  }
+  const ctx = await ENGINES[engine].launchPersistentContext(dir, opts);
   if (withExtension && USERSCRIPT) await ctx.addInitScript({ path: USERSCRIPT });
   const page = ctx.pages()[0] || await ctx.newPage();
   return { ctx, page };
@@ -64,6 +90,12 @@ async function state(page, ms = 9000, target = page) {
 }
 const plays = (s) => s.status === 'OK' && s.stream && !s.said && (s.advanced > 1 || s.ad);
 const blocked = (s) => s.said && s.advanced < 0.5;
+// Outside Edge, a player that reports OK with a stream but does not advance may just be unable to
+// decode. That is INCONCLUSIVE, not a pass and not a failure.
+const playsOrInconclusive = (s) => plays(s) ? true
+  : (ENGINE !== 'chromium' && s.status === 'OK' && s.stream && !s.said ? 'INCONCLUSIVE' : false);
+const liveVerdict = (s) => blocked(s);
+const controlVerdict = (s) => plays(s) ? true : (ENGINE !== 'chromium' ? 'INCONCLUSIVE' : false);
 
 async function liveTiles(page) {
   return page.evaluate(() => {
@@ -74,30 +106,33 @@ async function liveTiles(page) {
   });
 }
 
-// ---- find fresh ids with a plain browser ----
-const scout = await launch(false);
+// ---- find fresh ids with Edge, a plain browser ----
+const scout = await launch(false, false, 'chromium');
 await acceptConsent(scout.page);
 const liveId = await findLiveId(scout.page);
 const normalId = await findNormalId(scout.page);
 console.log('live id', liveId, '| normal id', normalId);
-
-// ---- control: without the extension the live stream plays and live tiles show ----
-await scout.page.goto(`https://www.youtube.com/watch?v=${liveId}`);
-const ctl = await state(scout.page);
-report('control: live plays without No Live', plays(ctl), JSON.stringify(ctl));
-await scout.page.goto('https://www.youtube.com/results?search_query=news&sp=EgJAAQ%253D%253D');
-await scout.page.waitForTimeout(5000);
-const ctlTiles = await liveTiles(scout.page);
-report('control: live search shows live tiles', ctlTiles.live > 0, JSON.stringify(ctlTiles));
 await scout.ctx.close();
 
-// ---- with the extension ----
+// ---- control: without No Live, the live stream plays and live tiles show ----
+const control = await launch(false);
+await acceptConsent(control.page);
+await control.page.goto(`https://www.youtube.com/watch?v=${liveId}`);
+const ctl = await state(control.page);
+report(`control: live plays without No Live (${ENGINE})`, controlVerdict(ctl), JSON.stringify(ctl));
+await control.page.goto('https://www.youtube.com/results?search_query=news&sp=EgJAAQ%253D%253D');
+await control.page.waitForTimeout(5000);
+const ctlTiles = await liveTiles(control.page);
+report('control: live search shows live tiles', ctlTiles.live > 0, JSON.stringify(ctlTiles));
+await control.ctx.close();
+
+// ---- with No Live ----
 const { ctx, page } = await launch(true);
 await acceptConsent(page);
 
 await page.goto(`https://www.youtube.com/watch?v=${normalId}`);
 const normal = await state(page);
-report('normal video still plays', plays(normal), JSON.stringify(normal));
+report('normal video still plays', playsOrInconclusive(normal), JSON.stringify(normal));
 
 // SPA hop: normal -> live without a page load.
 await page.evaluate(() => { window.__noReload = true; });
@@ -110,19 +145,19 @@ await page.evaluate((id) => {
 await page.waitForURL(new RegExp(liveId), { timeout: 15000 });
 const spa = await state(page);
 const stillSpa = await page.evaluate(() => window.__noReload === true);
-report('SPA hop to live is blocked', stillSpa && blocked(spa), JSON.stringify({ ...spa, spa: stillSpa }));
-await page.screenshot({ path: path.join(OUT, 'spa-live.png') });
+report('SPA hop to live is blocked', stillSpa && liveVerdict(spa), JSON.stringify({ ...spa, spa: stillSpa }));
+await shot(page, 'spa-live.png');
 
 await page.goto(`https://www.youtube.com/watch?v=${liveId}`);
 const direct = await state(page);
-report('direct load of live is blocked', blocked(direct), JSON.stringify(direct));
-await page.screenshot({ path: path.join(OUT, 'direct-live.png') });
+report('direct load of live is blocked', liveVerdict(direct), JSON.stringify(direct));
+await shot(page, 'direct-live.png');
 
 await page.goto('https://www.youtube.com/results?search_query=news&sp=EgJAAQ%253D%253D');
 await page.waitForTimeout(5000);
 const t = await liveTiles(page);
 report('live search shows no live tiles', t.live === 0, JSON.stringify(t));
-await page.screenshot({ path: path.join(OUT, 'search-live.png') });
+await shot(page, 'search-live.png');
 
 await page.goto('https://www.youtube.com/results?search_query=how+to+boil+an+egg');
 await page.waitForTimeout(5000);
@@ -141,8 +176,9 @@ for (const host of ['www.youtube.com', 'www.youtube-nocookie.com']) {
     const frame = page.frames().find((f) => f.url().includes('/embed/'));
     if (frame) await frame.click('.ytp-large-play-button', { timeout: 5000 }).catch(() => {});
     const e = frame ? await state(page, 9000, frame) : { error: 'no frame' };
-    report(`embed on ${host}: ${label} ${want}`, frame && (want === 'blocked' ? blocked(e) : plays(e)), JSON.stringify(e));
-    if (label === 'live') await page.screenshot({ path: path.join(OUT, `embed-${host}.png`) });
+    const verdict = !frame ? false : (want === 'blocked' ? liveVerdict(e) : playsOrInconclusive(e));
+    report(`embed on ${host}: ${label} ${want}`, verdict, JSON.stringify(e));
+    if (label === 'live') await shot(page, `embed-${host}.png`);
   }
 }
 await ctx.close();
@@ -154,15 +190,18 @@ await m.page.goto(`https://m.youtube.com/watch?v=${liveId}`);
 await m.page.waitForTimeout(2000);
 await m.page.click('body', { position: { x: 200, y: 120 } }).catch(() => {});
 const mob = await state(m.page);
-report('mobile site: live is blocked', blocked(mob), JSON.stringify({ ...mob, url: m.page.url() }));
-await m.page.screenshot({ path: path.join(OUT, 'mobile-live.png') });
+report('mobile site: live is blocked', liveVerdict(mob), JSON.stringify({ ...mob, url: m.page.url() }));
+await shot(m.page, 'mobile-live.png');
 await m.page.goto(`https://m.youtube.com/watch?v=${normalId}`);
 await m.page.waitForTimeout(2000);
 await m.page.click('body', { position: { x: 200, y: 120 } }).catch(() => {});
 const mobN = await state(m.page);
-report('mobile site: normal video plays', plays(mobN), JSON.stringify(mobN));
+report('mobile site: normal video plays', playsOrInconclusive(mobN), JSON.stringify(mobN));
 await m.ctx.close();
 
-const failed = results.filter((r) => !r).length;
-console.log(failed ? `${failed} FAILED` : 'ALL PASS');
+const failed = verdicts.filter((v) => v === 'FAIL').length;
+const inconclusive = verdicts.filter((v) => v === 'INCONCLUSIVE').length;
+console.log(`${verdicts.length} checks: ${verdicts.length - failed - inconclusive} PASS, ${inconclusive} INCONCLUSIVE, ${failed} FAIL`);
+console.log(failed ? `${failed} FAILED`
+  : inconclusive ? `NO FAILURES, ${inconclusive} INCONCLUSIVE` : 'ALL PASS');
 process.exit(failed ? 1 : 0);

@@ -1,15 +1,26 @@
 {
   "name": "no-live",
-  "version": "1.0.0",
+  "version": "0.2.0",
   "description": "Blocks every live stream on YouTube in this browser.",
   "scripts": {
     "build": "node build.mjs",
     "test": "node build.mjs && node test/run.mjs",
-    "test:userscript": "node build.mjs && node test/run.mjs --userscript"
+    "test:userscript": "node build.mjs && node test/run.mjs --userscript",
+    "test:firefox": "node build.mjs && node test/run.mjs --engine=firefox",
+    "test:webkit": "node build.mjs && node test/run.mjs --engine=webkit",
+    "test:offline": "node build.mjs && node test/offline.mjs",
+    "test:offline:firefox": "node build.mjs && node test/offline.mjs --engine=firefox",
+    "test:offline:webkit": "node build.mjs && node test/offline.mjs --engine=webkit",
+    "perf": "node build.mjs && node test/perf.mjs",
+    "lint": "node build.mjs && web-ext lint --source-dir=extension",
+    "pack": "node build.mjs && node pack.mjs",
+    "sign:firefox": "web-ext sign --source-dir=extension --artifacts-dir=dist --channel=unlisted"
   },
   "license": "MIT",
   "devDependencies": {
-    "playwright": "^1.64.1"
+    "archiver": "^8.0.0",
+    "playwright": "^1.64.1",
+    "web-ext": "^10.8.0"
   },
   "private": true,
   "type": "module"

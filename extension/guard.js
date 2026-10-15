@@ -10,7 +10,8 @@
 (() => {
   'use strict';
   if (window.__noLiveGuard) return;
-  window.__noLiveGuard = true;
+  // Read-only marker: a page script can't switch the guard off by overwriting it.
+  Object.defineProperty(window, '__noLiveGuard', { value: true });
 
   const MESSAGE = 'Live streams are blocked in this browser (No Live).';
   // Language-independent badge styles YouTube uses for "live now" tiles.
@@ -22,6 +23,9 @@
   // player drops its copy of the data.
   const blockedIds = new Set();
   const note = (what) => { log.push(what); if (log.length > 30) log.shift(); };
+  const validId = (id) => typeof id === 'string' && id.length > 0;
+  // Deeper than this, the scan stops (YouTube's data is far shallower), so it can't overflow the stack.
+  const MAX_DEPTH = 200;
 
   // ---- Layer 1: player data ----
 
@@ -49,8 +53,8 @@
   // Walks the tree bottom-up. Each node reports whether it holds a live badge and how many
   // distinct video ids it holds (0, 1 or "2 or more"). An array entry with a live badge and
   // exactly one video id is a single live tile, so it is removed. Shelves hold many ids and stay.
-  function scan(node) {
-    if (node === null || typeof node !== 'object') return { live: false, id: null, many: false };
+  function scan(node, depth = 0) {
+    if (node === null || typeof node !== 'object' || depth > MAX_DEPTH) return { live: false, id: null, many: false };
     const acc = { live: false, id: null, many: false };
     const merge = (r) => {
       if (r.live) acc.live = true;
@@ -62,7 +66,7 @@
     };
     if (Array.isArray(node)) {
       for (let i = node.length - 1; i >= 0; i--) {
-        const r = scan(node[i]);
+        const r = scan(node[i], depth + 1);
         if (r.live && r.id && !r.many && isTile(node[i])) {
           node.splice(i, 1);
           continue;
@@ -78,7 +82,7 @@
         else if (ID_KEYS.includes(key)) merge({ live: false, id: value, many: false });
         else if (key === 'style' && value === 'LIVE') acc.live = true;
       } else if (value && typeof value === 'object') {
-        merge(scan(value));
+        merge(scan(value, depth + 1));
       }
     }
     return acc;
@@ -98,10 +102,14 @@
       if (!data || typeof data !== 'object') return data;
       if (data.playabilityStatus && data.videoDetails) {
         const live = isLivePlayer(data);
-        note((live ? 'blocked ' : 'allowed ') + (data.videoDetails.videoId || '?') + ' via ' + via);
+        const id = data.videoDetails.videoId;
+        note((live ? 'blocked ' : 'allowed ') + (id || '?') + ' via ' + via);
         if (live) {
-          blockedIds.add(data.videoDetails.videoId);
+          if (validId(id)) blockedIds.add(id);
           blockPlayer(data);
+        } else if (validId(id)) {
+          // Not live now (a replay, or a stream that has ended): stop covering this id.
+          blockedIds.delete(id);
         }
         return data;
       }
@@ -128,11 +136,19 @@
     return value;
   };
 
-  // response.json() doesn't go through JSON.parse, so wrap it too.
+  // response.json() doesn't go through JSON.parse, so wrap it too. Only YouTube's hosts count.
+  function isYouTubeUrl(url) {
+    try {
+      const host = new URL(url || location.href).hostname;
+      return /(^|\.)youtube(-nocookie)?\.com$/.test(host) || host === 'youtubei.googleapis.com';
+    } catch (e) {
+      return false;
+    }
+  }
   const nativeJson = Response.prototype.json;
   Response.prototype.json = function () {
     return nativeJson.call(this).then((value) => {
-      if (/youtube/.test(this.url || location.host)) process(value, 'json');
+      if (isYouTubeUrl(this.url)) process(value, 'json');
       return value;
     });
   };
@@ -173,7 +189,7 @@
       }
       if (player.getVideoData) {
         const vd = player.getVideoData();
-        if (vd && (vd.isLive || blockedIds.has(vd.video_id))) return true;
+        if (vd && (vd.isLive || (validId(vd.video_id) && blockedIds.has(vd.video_id)))) return true;
       }
     } catch (e) { /* not ready yet */ }
     return false;
@@ -199,18 +215,22 @@
   }
 
   function check() {
-    for (const player of players()) {
-      if (playerIsLive(player)) {
-        try { player.stopVideo && player.stopVideo(); } catch (e) { /* ignore */ }
-        for (const video of player.querySelectorAll('video')) {
-          video.pause();
-          video.muted = true;
+    try {
+      for (const player of players()) {
+        if (playerIsLive(player)) {
+          try { player.stopVideo && player.stopVideo(); } catch (e) { /* ignore */ }
+          for (const video of player.querySelectorAll('video')) {
+            video.pause();
+            video.muted = true;
+          }
+          if (!player.querySelector('#' + OVERLAY_ID)) note('backstop stopped a live player');
+          cover(player);
+        } else {
+          uncover(player);
         }
-        if (!player.querySelector('#' + OVERLAY_ID)) note('backstop stopped a live player');
-        cover(player);
-      } else {
-        uncover(player);
       }
+    } catch (e) {
+      note('backstop error: ' + (e && e.message));
     }
   }
 
@@ -218,8 +238,9 @@
     document.addEventListener(event, check, true);
   }
   // Media events don't bubble, but they do pass through the capture phase, so these fire as
-  // soon as any video starts loading, well before the first frame is drawn.
-  for (const event of ['loadstart', 'loadedmetadata', 'play', 'playing', 'timeupdate']) {
+  // soon as any video starts loading, well before the first frame is drawn. 'volumechange'
+  // catches an unmute (by YouTube or by hand) and mutes again at once.
+  for (const event of ['loadstart', 'loadedmetadata', 'play', 'playing', 'timeupdate', 'volumechange']) {
     document.addEventListener(event, check, true);
   }
   setInterval(check, 1000);
