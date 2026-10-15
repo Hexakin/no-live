@@ -1,7 +1,5 @@
 # No Live
 
-AI DRAFT (Claude), 15 Oct 2026. Not yet reviewed by Jonathan.
-
 No Live stops **every** live stream on YouTube in the browser it is installed in. That includes live TV
 channels, such as BBC News, which now streams live on YouTube in the UK. Ordinary videos, clips and
 replays of streams that have ended still play.
