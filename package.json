@@ -1,0 +1,16 @@
+{
+  "name": "no-live",
+  "version": "1.0.0",
+  "description": "Blocks every live stream on YouTube in this browser.",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node build.mjs && node test/run.mjs",
+    "test:userscript": "node build.mjs && node test/run.mjs --userscript"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "playwright": "^1.64.1"
+  },
+  "private": true,
+  "type": "module"
+}
